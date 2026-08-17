@@ -1,0 +1,7 @@
+{
+  "name": "ip",
+  "version": "3.0.0",
+  "description": "Minimal non-classifying IP formatter used by bittorrent-tracker's optional server parser",
+  "main": "index.cjs",
+  "license": "MIT"
+}

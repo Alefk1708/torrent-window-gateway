@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Exemplo de incorporação</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111; }
+    iframe { width: min(100%, 1200px); aspect-ratio: 16 / 9; border: 0; }
+  </style>
+</head>
+<body>
+  <!-- Substitua pelo playerUrl retornado por POST /api/v1/playbacks. -->
+  <iframe
+    src="https://SEU-APP.koyeb.app/player/TORRENT_ID/0?playback=PLAYBACK_ID&amp;token=PLAYBACK_TOKEN"
+    allow="autoplay; fullscreen; picture-in-picture"
+    allowfullscreen
+    referrerpolicy="no-referrer"
+  ></iframe>
+</body>
+</html>

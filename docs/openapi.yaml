@@ -1,0 +1,660 @@
+openapi: 3.1.0
+info:
+  title: Torrent Window Gateway API
+  version: 1.0.0
+  description: |
+    Torrent-to-HTTP Range gateway for content the operator is authorized to access and distribute.
+    Administrative operations accept either `Authorization: Bearer <API_KEY>` or `X-API-Key`.
+    Playback operations accept a temporary token in `X-Playback-Token`, Bearer authorization, or `token` query parameter.
+servers:
+  - url: /
+tags:
+  - name: Public
+  - name: Torrents
+  - name: Playbacks
+  - name: Streaming
+  - name: Operations
+paths:
+  /:
+    get:
+      tags: [Public]
+      summary: Identify the service
+      operationId: serviceInfo
+      responses:
+        '200':
+          description: Service links
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /health:
+    get:
+      tags: [Public]
+      summary: Liveness check
+      operationId: health
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Process is alive but the torrent engine is unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { const: degraded }
+  /ready:
+    get:
+      tags: [Public]
+      summary: Readiness check
+      operationId: ready
+      responses:
+        '200':
+          description: Startup completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ready
+        '503':
+          description: Torrent engine is not ready
+  /docs:
+    get:
+      tags: [Public]
+      summary: Human-readable API introduction
+      operationId: docsPage
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema: { type: string }
+  /openapi.yaml:
+    get:
+      tags: [Public]
+      summary: OpenAPI contract
+      operationId: openApi
+      responses:
+        '200':
+          description: This document
+          content:
+            application/yaml:
+              schema: { type: string }
+  /api/v1/torrents:
+    get:
+      tags: [Torrents]
+      summary: List torrent sessions
+      operationId: listTorrents
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Torrent sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [torrents]
+                properties:
+                  torrents:
+                    type: array
+                    items: { $ref: '#/components/schemas/Torrent' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Torrents]
+      summary: Add a magnet or .torrent
+      operationId: addTorrent
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [magnet]
+              properties:
+                magnet:
+                  type: string
+                  pattern: '^magnet:\?'
+                  maxLength: 16384
+          application/x-bittorrent:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Existing session reused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AddTorrentResult' }
+        '202':
+          description: Session created; metadata may still be resolving
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AddTorrentResult' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/v1/torrents/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TorrentId'
+    get:
+      tags: [Torrents]
+      summary: Get torrent status and files
+      operationId: getTorrent
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Torrent state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [torrent]
+                properties:
+                  torrent: { $ref: '#/components/schemas/Torrent' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Torrents]
+      summary: Delete a torrent session and its cache
+      operationId: deleteTorrent
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      parameters:
+        - name: force
+          in: query
+          schema: { type: boolean, default: false }
+          description: Interrupt active playback and streams.
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/torrents/{id}/files/{fileId}:
+    parameters:
+      - $ref: '#/components/parameters/TorrentId'
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [Torrents]
+      summary: Get one torrent file
+      operationId: getTorrentFile
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: File metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file]
+                properties:
+                  file: { $ref: '#/components/schemas/TorrentFile' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/playbacks:
+    get:
+      tags: [Playbacks]
+      summary: List playback sessions
+      operationId: listPlaybacks
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Active playbacks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [playbacks]
+                properties:
+                  playbacks:
+                    type: array
+                    items: { $ref: '#/components/schemas/Playback' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Playbacks]
+      summary: Create a temporary playback URL/token
+      operationId: createPlayback
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [torrentId, fileId]
+              properties:
+                torrentId: { type: string, format: uuid }
+                fileId: { type: integer, minimum: 0 }
+      responses:
+        '201':
+          description: Playback created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatePlaybackResult' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/v1/playbacks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PlaybackId'
+    get:
+      tags: [Playbacks]
+      summary: Inspect a playback
+      operationId: getPlayback
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+        - PlaybackBearer: []
+        - PlaybackHeader: []
+        - PlaybackQuery: []
+      responses:
+        '200':
+          description: Playback and runtime torrent state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlaybackRuntime' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Playbacks]
+      summary: Send heartbeat and current media position
+      operationId: updatePlayback
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+        - PlaybackBearer: []
+        - PlaybackHeader: []
+        - PlaybackQuery: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                currentTime: { type: number, minimum: 0 }
+                duration: { type: number, exclusiveMinimum: 0 }
+                paused: { type: boolean }
+      responses:
+        '200':
+          description: Updated state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlaybackRuntime' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Playbacks]
+      summary: End a playback
+      operationId: deletePlayback
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+        - PlaybackBearer: []
+        - PlaybackHeader: []
+        - PlaybackQuery: []
+      parameters:
+        - name: force
+          in: query
+          schema: { type: boolean, default: false }
+          description: Admin-only option to remove a playback with an active stream.
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/stream/{torrentId}/{fileId}:
+    parameters:
+      - name: torrentId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/FileId'
+      - $ref: '#/components/parameters/PlaybackQueryId'
+      - name: token
+        in: query
+        schema: { type: string }
+        description: Temporary playback token. Prefer a header for non-browser clients.
+      - $ref: '#/components/parameters/Range'
+    get:
+      tags: [Streaming]
+      summary: Stream a file with a single HTTP byte range
+      operationId: streamFile
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+        - PlaybackBearer: []
+        - PlaybackHeader: []
+        - PlaybackQuery: []
+      responses:
+        '200':
+          description: Full response when no Range was supplied
+          headers:
+            Accept-Ranges: { schema: { const: bytes } }
+            Content-Length: { schema: { type: integer } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: Requested byte range
+          headers:
+            Accept-Ranges: { schema: { const: bytes } }
+            Content-Length: { schema: { type: integer } }
+            Content-Range: { schema: { type: string, example: 'bytes 0-1048575/2147483648' } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '416':
+          description: Unsatisfiable or malformed range
+          headers:
+            Content-Range: { schema: { type: string, example: 'bytes */2147483648' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '504': { $ref: '#/components/responses/Error' }
+    head:
+      tags: [Streaming]
+      summary: Inspect file/range response headers
+      operationId: headStreamFile
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+        - PlaybackBearer: []
+        - PlaybackHeader: []
+        - PlaybackQuery: []
+      responses:
+        '200': { description: File headers }
+        '206': { description: Range headers }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '416': { $ref: '#/components/responses/Error' }
+  /player/{torrentId}/{fileId}:
+    parameters:
+      - name: torrentId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - $ref: '#/components/parameters/FileId'
+      - $ref: '#/components/parameters/PlaybackQueryId'
+      - name: token
+        in: query
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Streaming]
+      summary: Open the embeddable HTML5 player
+      operationId: player
+      security:
+        - PlaybackQuery: []
+      responses:
+        '200':
+          description: Player page
+          content:
+            text/html:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/stats:
+    get:
+      tags: [Operations]
+      summary: Get process and swarm statistics
+      operationId: stats
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Runtime statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/admin/gc:
+    post:
+      tags: [Operations]
+      summary: Evict every currently unprotected cached piece
+      operationId: runGc
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Collection result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [evictedPieces, evictedBytes, cacheBytes]
+                properties:
+                  evictedPieces: { type: integer }
+                  evictedBytes: { type: integer }
+                  cacheBytes: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /metrics:
+    get:
+      tags: [Operations]
+      summary: Read Prometheus text metrics
+      operationId: metrics
+      security:
+        - AdminBearer: []
+        - AdminHeader: []
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    AdminBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: API_KEY
+      description: Administrative API key.
+    AdminHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    PlaybackBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: playback-token
+    PlaybackHeader:
+      type: apiKey
+      in: header
+      name: X-Playback-Token
+    PlaybackQuery:
+      type: apiKey
+      in: query
+      name: token
+  parameters:
+    TorrentId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PlaybackId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    FileId:
+      name: fileId
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+    PlaybackQueryId:
+      name: playback
+      in: query
+      schema: { type: string, format: uuid }
+      description: Required with playback-token authentication.
+    Range:
+      name: Range
+      in: header
+      schema: { type: string, example: 'bytes=0-1048575' }
+      description: Only one byte range is accepted per request.
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Health:
+      type: object
+      required: [status, uptimeSeconds]
+      properties:
+        status: { const: ok }
+        uptimeSeconds: { type: integer, minimum: 0 }
+    Error:
+      type: object
+      required: [error, message, requestId]
+      properties:
+        error: { type: string }
+        message: { type: string }
+        requestId: { type: string }
+        details: true
+    TorrentFile:
+      type: object
+      required: [id, name, path, size, contentType, streamable, browserCompatible]
+      properties:
+        id: { type: integer, minimum: 0 }
+        name: { type: string }
+        path: { type: string }
+        size: { type: integer, minimum: 0 }
+        contentType: { type: string }
+        streamable: { type: boolean }
+        browserCompatible: { type: boolean }
+    PieceRange:
+      type: object
+      required: [from, to]
+      properties:
+        from: { type: integer, minimum: 0 }
+        to: { type: integer, minimum: 0 }
+    Torrent:
+      type: object
+      required: [id, infoHash, state, files]
+      properties:
+        id: { type: string, format: uuid }
+        infoHash: { type: string }
+        name: { type: [string, 'null'] }
+        state:
+          enum: [resolving_metadata, metadata, ready, error, deleting]
+        error: { type: [string, 'null'] }
+        warning: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        lastAccessAt: { type: string, format: date-time }
+        metadataReceivedAt: { type: [string, 'null'], format: date-time }
+        size: { type: [integer, 'null'] }
+        pieceLength: { type: [integer, 'null'] }
+        pieceCount: { type: [integer, 'null'] }
+        peers: { type: integer }
+        downloadSpeed: { type: number }
+        uploadSpeed: { type: number }
+        receivedBytes: { type: number }
+        uploadedBytes: { type: number }
+        cacheBytes: { type: integer }
+        cachePieces: { type: integer }
+        playbackCount: { type: integer }
+        activeStreams: { type: integer }
+        activeWindows: { type: integer }
+        protectedPieceRanges:
+          type: array
+          items: { $ref: '#/components/schemas/PieceRange' }
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/TorrentFile' }
+    AddTorrentResult:
+      type: object
+      required: [reused, torrent, statusUrl]
+      properties:
+        reused: { type: boolean }
+        torrent: { $ref: '#/components/schemas/Torrent' }
+        statusUrl: { type: string }
+    Playback:
+      type: object
+      required: [id, torrentId, fileId, createdAt, lastSeenAt, expiresAt, paused, activeStreams]
+      properties:
+        id: { type: string, format: uuid }
+        torrentId: { type: string, format: uuid }
+        fileId: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        currentTime: { type: [number, 'null'] }
+        duration: { type: [number, 'null'] }
+        paused: { type: boolean }
+        activeStreams: { type: integer }
+    RuntimeTorrent:
+      type: object
+      required: [id, state, peers, downloadSpeed, uploadSpeed, receivedBytes, cacheBytes, cachePieces, activeStreams, playbackCount]
+      properties:
+        id: { type: string, format: uuid }
+        state: { type: string }
+        peers: { type: integer }
+        downloadSpeed: { type: number }
+        uploadSpeed: { type: number }
+        receivedBytes: { type: number }
+        cacheBytes: { type: integer }
+        cachePieces: { type: integer }
+        activeStreams: { type: integer }
+        playbackCount: { type: integer }
+    PlaybackRuntime:
+      type: object
+      required: [playback, torrent]
+      properties:
+        playback: { $ref: '#/components/schemas/Playback' }
+        torrent: { $ref: '#/components/schemas/RuntimeTorrent' }
+    CreatePlaybackResult:
+      type: object
+      required: [playback, token, playerUrl, streamUrl, iframe]
+      properties:
+        playback: { $ref: '#/components/schemas/Playback' }
+        token:
+          type: string
+          description: Returned only when the playback is created.
+        playerUrl: { type: string, format: uri }
+        streamUrl: { type: string, format: uri }
+        iframe: { type: string }
