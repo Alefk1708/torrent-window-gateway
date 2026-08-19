@@ -13,6 +13,8 @@ flowchart TD
     T --> R[Swarm BitTorrent]
     R --> C[SlidingPieceStore]
     C -->|piece necessário| B
+    B --> F[TranscodeManager (ffmpeg)]
+    F -->|MP4 fragmentado| P
     G[GC periódico] -->|evict fora das janelas| C
 ```
 
@@ -56,6 +58,18 @@ O pacote fixa `webtorrent@3.0.21`. `_markUnverified`, `_selections` e `_updateSe
 
 `bittorrent-tracker` também importa antecipadamente o parser de seu servidor opcional, embora este projeto use somente o cliente. Esse parser depende do pacote `ip`, cujo classificador público/privado não possui correção para CVE-2024-29415. O override em `vendor/ip-safe` expõe exclusivamente o formatador `toString` realmente referenciado pelo parser e remove as rotinas vulneráveis; o gateway nunca instancia um tracker server.
 
+## Transcodificação sob demanda
+
+O endpoint de stream aceita o parâmetro opcional `height` (ex.: `1080`, `720`, `480`, `320`, `144`). Quando presente:
+
+1. O gateway abre o mesmo endpoint de piece-backed stream via loopback como input do ffmpeg.
+2. `TranscodeManager` inicia o ffmpeg com `scale=-2:min(ih,<height>)`, H.264/AAC e um perfil de bitrate/CRF específico para 1080p, 720p, 480p, 320p ou 144p. A escala nunca aumenta a resolução do arquivo de origem.`.
+3. O primeiro frame (fragmento `ftyp`/`moov`/`moof`) é detectado via evento `readable` no stdout do child.
+4. O stdout do child é pipeado para um `PassThrough` (que resume o stream pausado) e entregue ao cliente como `video/mp4` fragmentado.
+5. Abort do cliente (`pagehide` + `DELETE /playbacks/:id?force=true`) mata o job, fecha o pipe e libera o slot de transcode.
+
+O player HTML expõe um seletor "Original" / "1080p" / "720p" / ... quando o container/codec não é nativamente suportado. Trocas de qualidade reiniciam o ffmpeg com `-ss <posição>`.
+
 ## Coleta de lixo
 
 O GC roda a cada `GC_INTERVAL_SECONDS` e respeita esta ordem:
@@ -65,6 +79,14 @@ O GC roda a cada `GC_INTERVAL_SECONDS` e respeita esta ordem:
 3. LRU global fora de janela quando o processo supera seu teto.
 
 Pieces protegidos não são removidos, mesmo acima do limite. Assim, os limites são de melhor esforço: a correção do stream tem precedência, e muitas janelas afastadas podem ultrapassar temporariamente o orçamento.
+
+## Teardown rápido ao parar de assistir
+
+Uma sessão de torrent que estava sendo assistida é removida rapidamente quando o último espectador sai (`pagehide` → `DELETE /playbacks/:id?force=true` → `abortPlaybackWork` → `torrentStopGraceMs`). Sessões que nunca foram usadas mantêm o timer longo `torrentIdleMs`. O fluxo:
+
+1. Player detecta `pagehide` e envia `DELETE` com `force=true` e `keepalive=true`.
+2. `TorrentManager.abortPlaybackWork` aborta todos os streams/transcodes da reprodução e remove a janela da sessão.
+3. `TorrentManager.deletePlaybackInternal` limpa a janela, decrementa contadores e o GC de manutenção detecta uso ocioso em `torrentStopGraceMs` (padrão 10s) e remove a sessão.
 
 ## Ciclo de uma requisição Range
 
@@ -96,8 +118,8 @@ DNS rebinding e redirects de tracker são riscos que também dependem do comport
 
 - disco para pieces; RAM fica com buffers pequenos;
 - `storeCacheSlots: 0`, evitando cache duplicado de pieces na memória;
-- sem FFmpeg, HLS ou análise completa de mídia;
-- conexões, torrents, streams e playback limitados;
+- sem FFmpeg, HLS ou análise completa de mídia — transcodificação opcional via `pipe:1` sob demanda;
+- conexões, torrents, streams, playback e transcodes limitados;
 - chunk HTTP de 256 KiB;
 - uma única instância e estado efêmero.
 

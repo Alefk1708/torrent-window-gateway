@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Torrent Window Gateway API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Torrent-to-HTTP Range gateway for content the operator is authorized to access and distribute.
     Administrative operations accept either `Authorization: Bearer <API_KEY>` or `X-API-Key`.
@@ -329,7 +329,7 @@ paths:
         - name: force
           in: query
           schema: { type: boolean, default: false }
-          description: Admin-only option to remove a playback with an active stream.
+          description: Force removal even when active streams exist (aborts them immediately).
       responses:
         '204': { description: Removed }
         '401': { $ref: '#/components/responses/Error' }
@@ -347,10 +347,18 @@ paths:
         in: query
         schema: { type: string }
         description: Temporary playback token. Prefer a header for non-browser clients.
+      - name: height
+        in: query
+        schema: { type: string, enum: ['1080', '720', '480', '320', '144'] }
+        description: Request on-the-fly transcode to the given resolution (e.g. 720p). Returns fragmented MP4 (H.264/AAC).
+      - name: start
+        in: query
+        schema: { type: number, minimum: 0, maximum: 172800 }
+        description: Start offset in seconds for the transcode (used when seeking in transcode mode).
       - $ref: '#/components/parameters/Range'
     get:
       tags: [Streaming]
-      summary: Stream a file with a single HTTP byte range
+      summary: Stream a file with a single HTTP byte range, or transcode to a lower resolution
       operationId: streamFile
       security:
         - AdminBearer: []
@@ -360,12 +368,14 @@ paths:
         - PlaybackQuery: []
       responses:
         '200':
-          description: Full response when no Range was supplied
+          description: Full response when no Range was supplied, or transcoded MP4 stream
           headers:
             Accept-Ranges: { schema: { const: bytes } }
             Content-Length: { schema: { type: integer } }
           content:
             application/octet-stream:
+              schema: { type: string, format: binary }
+            video/mp4:
               schema: { type: string, format: binary }
         '206':
           description: Requested byte range
@@ -481,7 +491,7 @@ paths:
         - AdminHeader: []
       responses:
         '200':
-          description: Prometheus exposition format
+          description: Prometheus exposition format (includes torrent_gateway_transcodes gauge)
           content:
             text/plain:
               schema: { type: string }
@@ -649,7 +659,7 @@ components:
         torrent: { $ref: '#/components/schemas/RuntimeTorrent' }
     CreatePlaybackResult:
       type: object
-      required: [playback, token, playerUrl, streamUrl, iframe]
+      required: [playback, token, playerUrl, streamUrl, transcodeHeights, iframe]
       properties:
         playback: { $ref: '#/components/schemas/Playback' }
         token:
@@ -657,4 +667,8 @@ components:
           description: Returned only when the playback is created.
         playerUrl: { type: string, format: uri }
         streamUrl: { type: string, format: uri }
+        transcodeHeights:
+          type: array
+          items: { type: integer, enum: [1080, 720, 480, 320, 144] }
+          description: Resoluções de transcodificação disponíveis para este arquivo/playback.
         iframe: { type: string }

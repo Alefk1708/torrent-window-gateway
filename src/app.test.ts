@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
 import { buildApplication } from './app.js'
 import { loadConfig } from './config.js'
 
 test('serves public endpoints and protects operational endpoints', async () => {
   const apiKey = '0123456789abcdef0123456789abcdef'
-  const cacheDir = `/tmp/torrent-window-gateway-test-${process.pid}`
+  const cacheDir = path.join(os.tmpdir(), `torrent-window-gateway-test-${process.pid}`)
   const config = loadConfig({
     API_KEY: apiKey,
     CACHE_DIR: cacheDir,

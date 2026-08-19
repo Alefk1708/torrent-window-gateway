@@ -2,15 +2,22 @@
 
 Gateway BitTorrent → HTTP Range para **conteúdo que você tem autorização para acessar e distribuir**. Foi desenhado para caber em uma única instância pequena do Koyeb, compartilhar o mesmo swarm entre vários espectadores e manter somente uma janela móvel de pieces no disco.
 
-> Não é um clone do Real-Debrid, não contorna DRM, não inclui catálogo, contas pagas, busca de conteúdo, transcodificação ou armazenamento permanente.
+> Não é um clone do Real-Debrid, não contorna DRM, não inclui catálogo, contas pagas, busca de conteúdo, contorno de DRM ou armazenamento permanente. A transcodificação aqui é apenas sob demanda para as resoluções suportadas.
+
+## Novidades na v1.1.0
+
+- **Parar ao deixar de assistir**: o player envia `DELETE /api/v1/playbacks/:id?force=true` no evento `pagehide`, abortando streams/transcodificações ativos e permitindo que o torrent seja removido do disco em ~10s (`TORRENT_STOP_GRACE_SECONDS`) após o último espectador sair.
+- **Troca de resolução sob demanda**: adicione `height=1080|720|480|320|144` ao endpoint `/api/v1/stream/...` para receber MP4 fragmentado (H.264/AAC) transcodificado em tempo real via ffmpeg. O player HTML expõe um seletor quando o container/codec não é nativamente suportado.
 
 ## O que está implementado
 
 - magnet URI e upload de `.torrent`;
 - resolução assíncrona de metadata e listagem de arquivos;
 - `GET`/`HEAD` com `Range`, `206`, `Content-Range` e seek;
-- player HTML incorporável por `<iframe>`;
+- **transcodificação sob demanda** (1080p/720p/480p/320p/144p) via ffmpeg, entregando MP4 fragmentado;
+- player HTML incorporável por `<iframe>` com seletor de qualidade;
 - sessões de reprodução com token aleatório, expiração e heartbeat;
+- **teardown imediato ao sair da página** (`pagehide` → `DELETE ?force=true`);
 - vários espectadores no mesmo torrent, com união das janelas necessárias;
 - priorização dos pieces próximos a cada posição de reprodução;
 - cache em disco por piece, descarte de dados que ficaram para trás e novo download após seek;
@@ -18,7 +25,7 @@ Gateway BitTorrent → HTTP Range para **conteúdo que você tem autorização p
 - limpeza de sessões ociosas, coleta de lixo manual/automática e shutdown limpo;
 - proteção administrativa por `API_KEY`, filtro de trackers/webseeds contra redes privadas, CORS e CSP;
 - health/readiness, estatísticas, métricas Prometheus e OpenAPI 3.1;
-- Docker multi-stage pronto para Koyeb.
+- Docker multi-stage pronto para Koyeb (inclui ffmpeg).
 
 ## Como a janela móvel funciona
 
@@ -36,7 +43,7 @@ Isso limita o **cache residente**, mas não garante reprodução sem travamentos
 
 Os padrões foram pensados para a instância gratuita atual do Koyeb (512 MB de RAM, 0,1 vCPU e 2 GB de SSD efêmero). Use como projeto pessoal, demonstração ou carga pequena. O serviço grátis pode entrar em scale-to-zero; o disco e as sessões podem desaparecer em reinícios/reagendamentos.
 
-Com os padrões, espere poucos espectadores simultâneos. Para mais usuários, aumente CPU/RAM/disco e ajuste os limites. Transcodificar HEVC/DTS/TrueHD ou gerar HLS em tempo real não cabe de forma confiável nessa máquina, por isso este projeto faz somente stream direto.
+Com os padrões, espere poucos espectadores simultâneos. Para mais usuários, aumente CPU/RAM/disco e ajuste os limites. Transcodificar HEVC/DTS/TrueHD ou gerar HLS em tempo real não cabe de forma confiável nessa máquina, por isso o stream direto continua sendo o caminho mais barato; a transcodificação H.264/AAC é opcional e limitada por `MAX_TRANSCODES`.
 
 ## Compatibilidade de mídia
 
@@ -183,11 +190,15 @@ O passo a passo e os ajustes recomendados estão em [docs/KOYEB.md](docs/KOYEB.m
 | `MAX_TORRENTS` | `3` | sessões de torrent simultâneas |
 | `MAX_PLAYBACKS` | `6` | sessões de player simultâneas |
 | `MAX_CONCURRENT_STREAMS` | `6` | respostas HTTP de mídia abertas |
+| `MAX_TRANSCODES` | `2` | jobs ffmpeg simultâneos (0 desliga) |
 | `MAX_PEER_CONNECTIONS` | `24` | conexões BitTorrent do cliente |
 | `STREAM_MAX_MBIT` | `20` | limite por resposta; `0` desliga |
 | `UPLOAD_SLOTS` | `0` | upload/seeding desativado por padrão |
 | `PLAYBACK_IDLE_SECONDS` | `90` | expiração sem heartbeat/stream |
 | `TORRENT_IDLE_MINUTES` | `15` | remoção de torrent sem uso |
+| `TORRENT_STOP_GRACE_SECONDS` | `10` | remoção rápida após último espectador sair |
+| `TRANSCODE_ENABLED` | `true` | ativa/desativa transcodificação |
+| `FFMPEG_PATH` | `ffmpeg` | caminho do binário ffmpeg |
 | `CORS_ORIGINS` | `*` | origens permitidas, separadas por vírgula |
 | `FRAME_ANCESTORS` | `*` | quem pode incorporar o player |
 | `BIND_PLAYBACK_TO_IP` | `false` | vincula token ao IP original |

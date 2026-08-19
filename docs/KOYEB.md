@@ -123,7 +123,7 @@ Depois use um torrent pequeno, legal e bem semeado para validar metadata, um Ran
 
 ### MP4 funciona, MKV não
 
-Isso costuma ser compatibilidade do navegador com container/codec, não problema do Range. O projeto não remuxa nem transcodifica. Use mídia compatível com o navegador ou faça remux/transcode em infraestrutura separada.
+Isso costuma ser compatibilidade do navegador com container/codec, não problema do Range. Use o seletor de qualidade do player para acionar a transcodificação H.264/AAC via ffmpeg (1080p/720p/480p/320p/144p). Em instâncias pequenas, prefira stream direto quando o arquivo já for compatível e limite `MAX_TRANSCODES` para evitar saturação de CPU/RAM.
 
 ## Scale-to-zero
 

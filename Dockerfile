@@ -19,6 +19,11 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     CACHE_DIR=/tmp/torrent-window-gateway
 
+# ffmpeg powers the on-the-fly resolution ladder (1080p/720p/480p/320p/144p).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist

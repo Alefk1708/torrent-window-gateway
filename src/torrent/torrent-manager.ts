@@ -7,6 +7,7 @@ import type { AppConfig } from '../config.js'
 import { HttpError } from '../errors.js'
 import { constantTimeEqual, randomToken, tokenDigest } from '../security/credentials.js'
 import { isBlockedPeerAddress, parseAndSanitizeTorrent } from '../security/tracker-sanitizer.js'
+import { TranscodeManager } from '../streaming/transcoder.js'
 import { SlidingPieceStore } from './sliding-piece-store.js'
 import { TorrentSession, type LoggerLike } from './torrent-session.js'
 import type { TorrentFileLike, TorrentLike } from './webtorrent-types.js'
@@ -23,6 +24,7 @@ export interface PlaybackRecord {
   duration: number | null
   paused: boolean
   activeStreams: number
+  streamAborters: Set<AbortController>
 }
 
 export interface PlaybackHeartbeat {
@@ -37,6 +39,7 @@ export class TorrentManager {
   private readonly byInfoHash = new Map<string, string>()
   private readonly playbacks = new Map<string, PlaybackRecord>()
   private readonly maintenanceTimer: NodeJS.Timeout
+  readonly transcodes: TranscodeManager
   private maintenanceRunning = false
   private totalActiveStreams = 0
   private closed = false
@@ -75,12 +78,14 @@ export class TorrentManager {
 
     this.maintenanceTimer = setInterval(() => void this.maintenance(), config.gcIntervalMs)
     this.maintenanceTimer.unref()
+    this.transcodes = new TranscodeManager(config, logger)
   }
 
   async initialize(): Promise<void> {
     assertSafeCacheDirectory(this.config.cacheDir)
     await rm(this.config.cacheDir, { recursive: true, force: true })
     await mkdir(this.config.cacheDir, { recursive: true })
+    await this.transcodes.detectFFmpeg()
   }
 
   get isOperational(): boolean {
@@ -178,6 +183,7 @@ export class TorrentManager {
       duration: null,
       paused: true,
       activeStreams: 0,
+      streamAborters: new Set(),
     }
     this.playbacks.set(id, playback)
     session.playbackCount += 1
@@ -233,11 +239,12 @@ export class TorrentManager {
     return playback
   }
 
-  deletePlayback(id: string, token: string, clientIp: string): void {
+  deletePlayback(id: string, token: string, clientIp: string, force = false): void {
     const playback = this.authorizePlayback(id, token, clientIp, false)
-    if (playback.activeStreams > 0) {
+    if (playback.activeStreams > 0 && !force) {
       throw new HttpError(409, 'PLAYBACK_IN_USE', 'Playback still has an active HTTP stream')
     }
+    if (force) this.abortPlaybackWork(playback)
     this.deletePlaybackInternal(playback)
   }
 
@@ -246,7 +253,23 @@ export class TorrentManager {
     if (!force && playback.activeStreams > 0) {
       throw new HttpError(409, 'PLAYBACK_IN_USE', 'Playback still has an active HTTP stream')
     }
+    if (force) this.abortPlaybackWork(playback)
     this.deletePlaybackInternal(playback)
+  }
+
+  registerStreamAborter(playback: PlaybackRecord, controller: AbortController): void {
+    playback.streamAborters.add(controller)
+  }
+
+  unregisterStreamAborter(playback: PlaybackRecord, controller: AbortController): void {
+    playback.streamAborters.delete(controller)
+  }
+
+  /** Stops every stream and transcode tied to a playback, e.g. when the viewer left. */
+  abortPlaybackWork(playback: PlaybackRecord): void {
+    for (const controller of playback.streamAborters) controller.abort()
+    playback.streamAborters.clear()
+    this.transcodes.killForPlayback(playback.id)
   }
 
   acquireStream(session: TorrentSession, playback: PlaybackRecord | null): () => void {
@@ -324,6 +347,12 @@ export class TorrentManager {
         maxPlaybacks: this.config.maxPlaybacks,
         maxConcurrentStreams: this.config.maxConcurrentStreams,
       },
+      transcodes: {
+        enabled: this.transcodes.isEnabled,
+        available: this.transcodes.available,
+        active: this.transcodes.activeCount,
+        limit: this.config.maxTranscodes,
+      },
     }
   }
 
@@ -384,6 +413,7 @@ export class TorrentManager {
     if (this.closed) return
     this.closed = true
     clearInterval(this.maintenanceTimer)
+    this.transcodes.close()
     for (const playback of [...this.playbacks.values()]) this.deletePlaybackInternal(playback)
     for (const session of [...this.sessions.values()]) await session.destroy()
     this.sessions.clear()
@@ -407,6 +437,7 @@ export class TorrentManager {
 
   private deletePlaybackInternal(playback: PlaybackRecord): void {
     if (!this.playbacks.delete(playback.id)) return
+    this.transcodes.killForPlayback(playback.id)
     const session = this.sessions.get(playback.torrentId)
     if (session !== undefined) {
       session.playbackCount = Math.max(0, session.playbackCount - 1)
@@ -439,7 +470,14 @@ export class TorrentManager {
       const now = Date.now()
       for (const session of [...this.sessions.values()]) {
         const idle = session.playbackCount === 0 && session.activeStreams === 0 && session.windows.size === 0
-        if (idle && now - session.lastAccessAt >= this.config.torrentIdleMs) {
+        session.refreshUsageIdle()
+        // A session that was being watched is torn down quickly once the last
+        // viewer leaves; sessions that were never used keep the long idle timer.
+        const stoppedWatching = idle
+          && session.usageIdleSince !== null
+          && now - session.usageIdleSince >= this.config.torrentStopGraceMs
+        const longIdle = idle && now - session.lastAccessAt >= this.config.torrentIdleMs
+        if (stoppedWatching || longIdle) {
           await this.removeTorrent(session.id, true)
         }
       }

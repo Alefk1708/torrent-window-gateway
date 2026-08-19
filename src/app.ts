@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { PassThrough, Readable } from 'node:stream'
 import Fastify, { LogController, type FastifyReply, type FastifyRequest } from 'fastify'
 import type { AppConfig } from './config.js'
 import { HttpError } from './errors.js'
@@ -9,8 +10,10 @@ import { renderDocsPage, renderPlayerPage } from './player/page.js'
 import { contentDisposition, mediaInfo } from './streaming/media-type.js'
 import { createPieceStream } from './streaming/piece-stream.js'
 import { parseByteRange } from './streaming/range.js'
+import { TRANSCODE_HEIGHTS, parseStartSeconds, parseTranscodeHeight, type TranscodeJob } from './streaming/transcoder.js'
 import { TorrentManager, type PlaybackHeartbeat, type PlaybackRecord } from './torrent/torrent-manager.js'
 import type { TorrentSession } from './torrent/torrent-session.js'
+import type { TorrentFileLike } from './torrent/webtorrent-types.js'
 
 export async function buildApplication(config: AppConfig): Promise<{
   app: ReturnType<typeof Fastify>
@@ -95,11 +98,16 @@ export async function buildApplication(config: AppConfig): Promise<{
 
   app.get('/', async () => ({
     name: 'Torrent Window Gateway',
-    version: '1.0.0',
+    version: '1.1.0',
     purpose: 'HTTP Range streaming for authorized torrent content',
     docs: '/docs',
     openapi: '/openapi.yaml',
     health: '/health',
+    transcoding: {
+      enabled: manager.transcodes.isEnabled,
+      available: manager.transcodes.available,
+      heights: manager.transcodes.isEnabled && manager.transcodes.available ? [...TRANSCODE_HEIGHTS] : [],
+    },
   }))
 
   app.get('/health', async (_request, reply) => {
@@ -171,10 +179,17 @@ export async function buildApplication(config: AppConfig): Promise<{
     const fileId = numberField(body, 'fileId')
     const result = manager.createPlayback(torrentId, fileId, request.ip)
     const urls = playbackUrls(request, config, result.playback, result.token)
+    const session = manager.getSession(result.playback.torrentId)
+    const file = session.requireStreamableFile(result.playback.fileId)
+    const media = mediaInfo(file.name)
+    const transcodeHeights = manager.transcodes.isEnabled && manager.transcodes.available && media.contentType.startsWith('video/')
+      ? [...TRANSCODE_HEIGHTS]
+      : []
     return await reply.code(201).send({
       playback: manager.playbackJSON(result.playback),
       token: result.token,
       ...urls,
+      transcodeHeights,
       iframe: `<iframe src="${escapeAttribute(urls.playerUrl)}" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>`,
     })
   })
@@ -202,10 +217,11 @@ export async function buildApplication(config: AppConfig): Promise<{
 
   app.delete('/api/v1/playbacks/:id', async (request, reply) => {
     const id = pathParameter(request, 'id')
+    const force = queryRecord(request).force === 'true'
     if (isAdminRequest(request, config)) {
-      manager.deletePlaybackAdmin(id, queryRecord(request).force === 'true')
+      manager.deletePlaybackAdmin(id, force)
     } else {
-      manager.deletePlayback(id, playbackTokenFromRequest(request), request.ip)
+      manager.deletePlayback(id, playbackTokenFromRequest(request), request.ip, force)
     }
     return await reply.code(204).send()
   })
@@ -221,6 +237,21 @@ export async function buildApplication(config: AppConfig): Promise<{
       const fileId = parseId(pathParameter(request, 'fileId'), 'fileId')
       const file = session.requireStreamableFile(fileId)
       const playback = streamPlaybackForRequest(request, manager, config, session.id, fileId)
+
+      const streamQuery = queryRecord(request)
+      const heightParam = streamQuery.height ?? streamQuery.resolution
+      if (heightParam !== undefined) {
+        return await handleTranscodeRequest(request, reply, {
+          manager,
+          config,
+          session,
+          file,
+          fileId,
+          playback,
+          heightParam,
+          startParam: streamQuery.start,
+        })
+      }
 
       let range
       try {
@@ -251,6 +282,11 @@ export async function buildApplication(config: AppConfig): Promise<{
 
       const release = manager.acquireStream(session, playback)
       const abortController = new AbortController()
+      if (playback !== null) manager.registerStreamAborter(playback, abortController)
+      const releaseStream = () => {
+        if (playback !== null) manager.unregisterStreamAborter(playback, abortController)
+        release()
+      }
       const abort = () => abortController.abort()
       request.raw.once('aborted', abort)
       reply.raw.once('close', abort)
@@ -262,7 +298,7 @@ export async function buildApplication(config: AppConfig): Promise<{
         session.refreshSelectionsNow()
         await session.waitForPiece(Math.floor(firstGlobalByte / session.torrent.pieceLength), abortController.signal)
       } catch (error) {
-        release()
+        releaseStream()
         if (abortController.signal.aborted) {
           reply.hijack()
           return reply
@@ -282,10 +318,10 @@ export async function buildApplication(config: AppConfig): Promise<{
         signal: abortController.signal,
         config,
         onProgress: () => manager.touchPlaybackFromStream(playback),
-        onClose: release,
+        onClose: releaseStream,
       })
-      stream.once('error', release)
-      stream.once('close', release)
+      stream.once('error', releaseStream)
+      stream.once('close', releaseStream)
       return await reply.send(stream)
     },
   })
@@ -303,19 +339,24 @@ export async function buildApplication(config: AppConfig): Promise<{
     }
     const session = manager.getSession(torrentId)
     const file = session.requireStreamableFile(fileId)
+    const media = mediaInfo(file.name)
     const nonce = randomBytes(18).toString('base64url')
     const streamUrl = `/api/v1/stream/${encodeURIComponent(session.id)}/${fileId}?playback=${encodeURIComponent(playback.id)}&token=${encodeURIComponent(token)}`
     const playbackUrl = `/api/v1/playbacks/${encodeURIComponent(playback.id)}`
+    const transcodeHeights = manager.transcodes.isEnabled && manager.transcodes.available && media.contentType.startsWith('video/')
+      ? [...TRANSCODE_HEIGHTS]
+      : []
     reply.header('Cache-Control', 'private, no-store, max-age=0')
     reply.header('Content-Security-Policy', `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; media-src 'self' blob:; connect-src 'self'; frame-ancestors ${config.frameAncestors}`)
     return await reply.type('text/html; charset=utf-8').send(renderPlayerPage({
       nonce,
       title: file.name,
-      contentType: mediaInfo(file.name).contentType,
-      browserCompatible: mediaInfo(file.name).browserCompatible,
+      contentType: media.contentType,
+      browserCompatible: media.browserCompatible,
       streamUrl,
       playbackUrl,
       playbackToken: token,
+      transcodeHeights,
     }))
   })
 
@@ -376,6 +417,110 @@ function streamPlaybackForRequest(
     throw new HttpError(403, 'PLAYBACK_TARGET_MISMATCH', 'Playback token is not valid for this stream')
   }
   return playback
+}
+
+interface TranscodeRequestContext {
+  manager: TorrentManager
+  config: AppConfig
+  session: TorrentSession
+  file: TorrentFileLike
+  fileId: number
+  playback: PlaybackRecord | null
+  heightParam: unknown
+  startParam: unknown
+}
+
+/**
+ * Spawns ffmpeg reading the piece-backed stream endpoint over loopback and
+ * relays its fragmented-MP4 output. The response has no length and no ranges:
+ * seeking restarts the job at `start` seconds instead.
+ */
+async function handleTranscodeRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  ctx: TranscodeRequestContext,
+): Promise<unknown> {
+  const { manager, config, session, file, fileId, playback } = ctx
+  const height = parseTranscodeHeight(ctx.heightParam)
+  const startSeconds = parseStartSeconds(ctx.startParam)
+  if (playback === null) {
+    throw new HttpError(401, 'PLAYBACK_TOKEN_REQUIRED', 'Transcoding requires playback and token query parameters')
+  }
+  const token = playbackTokenFromRequest(request)
+
+  const applyHeaders = (): void => {
+    reply.header('Content-Type', 'video/mp4')
+    reply.header('Content-Disposition', transcodeDisposition(file.name, height))
+    reply.header('Cache-Control', 'private, no-store, max-age=0')
+    reply.code(200)
+  }
+
+  if (request.method === 'HEAD') {
+    applyHeaders()
+    return await reply.send()
+  }
+
+  // The loopback input below is the torrent byte stream and performs the real
+  // stream accounting. Counting this outer ffmpeg response as a second stream
+  // made one transcode consume two playback slots and caused quality switches
+  // to hit MAX_STREAMS_PER_PLAYBACK. This controller only owns the ffmpeg job.
+  const abortController = new AbortController()
+  manager.registerStreamAborter(playback, abortController)
+  let released = false
+  const releaseStream = () => {
+    if (released) return
+    released = true
+    manager.unregisterStreamAborter(playback, abortController)
+  }
+  const abort = () => abortController.abort()
+  request.raw.once('aborted', abort)
+  reply.raw.once('close', abort)
+
+  let job: TranscodeJob | null = null
+  try {
+    job = manager.transcodes.start({
+      playbackId: playback.id,
+      sourceUrl: loopbackStreamUrl(config, session.id, fileId, playback.id, token),
+      height,
+      startSeconds,
+    })
+    await job.waitForStart()
+  } catch (error) {
+    job?.kill()
+    releaseStream()
+    if (abortController.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      reply.hijack()
+      return reply
+    }
+    throw error
+  }
+
+  abortController.signal.addEventListener('abort', () => job?.kill(), { once: true })
+  applyHeaders()
+  const pass = new PassThrough()
+  job.stdout.pipe(pass)
+  pass.once('close', releaseStream)
+  pass.once('error', releaseStream)
+  job.waitForExit().then(() => pass.end()).catch(() => pass.end())
+  return await reply.send(pass)
+}
+
+function loopbackStreamUrl(
+  config: AppConfig,
+  torrentId: string,
+  fileId: number,
+  playbackId: string,
+  token: string,
+): string {
+  const host = config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host
+  const bracketed = host.includes(':') ? `[${host}]` : host
+  const query = `playback=${encodeURIComponent(playbackId)}&token=${encodeURIComponent(token)}`
+  return `http://${bracketed}:${config.port}/api/v1/stream/${encodeURIComponent(torrentId)}/${fileId}?${query}`
+}
+
+function transcodeDisposition(filename: string, height: number): string {
+  const base = filename.replace(/\.[^./\\]+$/, '') || 'media'
+  return contentDisposition(`${base}.${height}p.mp4`)
 }
 
 function playbackUrls(
@@ -454,6 +599,9 @@ function prometheusMetrics(manager: TorrentManager): string {
     '# HELP torrent_gateway_streams Active HTTP streams.',
     '# TYPE torrent_gateway_streams gauge',
     `torrent_gateway_streams ${Number(stats.activeStreams) || 0}`,
+    '# HELP torrent_gateway_transcodes Active ffmpeg transcode jobs.',
+    '# TYPE torrent_gateway_transcodes gauge',
+    `torrent_gateway_transcodes ${Number(stats.transcodes?.active) || 0}`,
     '# HELP torrent_gateway_cache_bytes Resident piece cache bytes.',
     '# TYPE torrent_gateway_cache_bytes gauge',
     `torrent_gateway_cache_bytes ${Number(stats.cacheBytes) || 0}`,

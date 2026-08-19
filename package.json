@@ -1,6 +1,6 @@
 {
   "name": "torrent-window-gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Resource-bounded torrent-to-HTTP streaming gateway for authorized content",
   "type": "module",
@@ -12,7 +12,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
-    "test": "tsx --test src/app.test.ts src/security/tracker-sanitizer.test.ts src/streaming/range.test.ts src/torrent/local-swarm.test.ts src/torrent/window-coordinator.test.ts src/torrent/sliding-piece-store.test.ts",
+    "test": "tsx --test src/app.test.ts src/security/tracker-sanitizer.test.ts src/streaming/range.test.ts src/streaming/transcoder.test.ts src/torrent/local-swarm.test.ts src/torrent/window-coordinator.test.ts src/torrent/sliding-piece-store.test.ts",
     "test:integration": "RUN_TORRENT_INTEGRATION=1 tsx --test src/torrent/local-swarm.test.ts"
   },
   "dependencies": {

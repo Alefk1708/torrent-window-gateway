@@ -36,6 +36,10 @@ export class TorrentSession extends EventEmitter {
   lastWarning: string | null = null
   playbackCount = 0
   activeStreams = 0
+  /** True once any playback, heartbeat or HTTP stream ever targeted this session. */
+  everUsed = false
+  /** When usage dropped to zero after the session had been used; null while in use or never used. */
+  usageIdleSince: number | null = null
 
   private store: SlidingPieceStore | null = null
   private readonly waiters = new Map<number, Set<PieceWaiter>>()
@@ -104,6 +108,7 @@ export class TorrentSession extends EventEmitter {
   }
 
   setWindow(id: string, cursor: number, file: TorrentFileLike): void {
+    this.everUsed = true
     const fileEnd = Math.max(file.offset, file.offset + file.length - 1)
     this.windows.set(
       id,
@@ -129,6 +134,15 @@ export class TorrentSession extends EventEmitter {
 
   isPieceProtected(index: number): boolean {
     return this.protectedRanges().some((range) => index >= range.from && index <= range.to)
+  }
+
+  refreshUsageIdle(): void {
+    const inUse = this.playbackCount > 0 || this.activeStreams > 0 || this.windows.size > 0
+    if (inUse) {
+      this.usageIdleSince = null
+    } else if (this.everUsed && this.usageIdleSince === null) {
+      this.usageIdleSince = Date.now()
+    }
   }
 
   cacheEntries(): StoreEntry[] {

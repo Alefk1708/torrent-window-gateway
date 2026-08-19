@@ -27,6 +27,11 @@ export interface AppConfig {
   playbackIdleMs: number
   playbackMaxMs: number
   torrentIdleMs: number
+  torrentStopGraceMs: number
+  ffmpegPath: string
+  transcodeEnabled: boolean
+  maxTranscodes: number
+  transcodeStartTimeoutMs: number
   maxTorrentFileBytes: number
   maxTorrentBytes: number
   maxTorrentFiles: number
@@ -157,13 +162,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxPlaybacks: integer(env, 'MAX_PLAYBACKS', 6, 1, 100),
     maxPlaybacksPerIp: integer(env, 'MAX_PLAYBACKS_PER_IP', 3, 1, 20),
     maxConcurrentStreams: integer(env, 'MAX_CONCURRENT_STREAMS', 6, 1, 100),
-    maxStreamsPerPlayback: integer(env, 'MAX_STREAMS_PER_PLAYBACK', 2, 1, 10),
+    maxStreamsPerPlayback: integer(env, 'MAX_STREAMS_PER_PLAYBACK', 3, 1, 10),
     maxPeerConnections: integer(env, 'MAX_PEER_CONNECTIONS', 24, 4, 200),
     metadataTimeoutMs: integer(env, 'METADATA_TIMEOUT_SECONDS', 60, 10, 600) * 1000,
     pieceTimeoutMs: integer(env, 'PIECE_TIMEOUT_SECONDS', 45, 5, 300) * 1000,
     playbackIdleMs: integer(env, 'PLAYBACK_IDLE_SECONDS', 90, 30, 3600) * 1000,
     playbackMaxMs: decimal(env, 'PLAYBACK_MAX_HOURS', 4, 0.25, 24) * 60 * 60 * 1000,
     torrentIdleMs: integer(env, 'TORRENT_IDLE_MINUTES', 15, 1, 1440) * 60 * 1000,
+    torrentStopGraceMs: integer(env, 'TORRENT_STOP_GRACE_SECONDS', 10, 5, 3600) * 1000,
+    ffmpegPath: env.FFMPEG_PATH?.trim() || 'ffmpeg',
+    transcodeEnabled: boolean(env, 'TRANSCODE_ENABLED', true),
+    maxTranscodes: integer(env, 'MAX_TRANSCODES', 2, 0, 64),
+    transcodeStartTimeoutMs: integer(env, 'TRANSCODE_START_TIMEOUT_SECONDS', 45, 5, 300) * 1000,
     maxTorrentFileBytes: integer(env, 'MAX_TORRENT_FILE_MB', 2, 1, 20) * MIB,
     maxTorrentBytes: decimal(env, 'MAX_TORRENT_SIZE_GB', 100, 1, 1000) * GIB,
     maxTorrentFiles: integer(env, 'MAX_TORRENT_FILES', 10_000, 1, 100_000),
